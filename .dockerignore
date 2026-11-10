@@ -1,0 +1,19 @@
+# Only application/build inputs may enter the Docker context.
+**
+!Dockerfile
+!global.json
+!Watchboard.Api.csproj
+!packages.lock.json
+!appsettings.json
+!LICENSE
+!Program.cs
+!Contracts/
+!Contracts/**/*.cs
+!Data/
+!Data/**/*.cs
+!Endpoints/
+!Endpoints/**/*.cs
+!Models/
+!Models/**/*.cs
+!Services/
+!Services/**/*.cs

@@ -1,54 +1,68 @@
 # Watchboard API
 
-Independent **.NET 10 / ASP.NET Core / EF Core SQLite** repository for personal software-release and game-price tracking. The React frontend is a separate repository; neither build nor tests require that repository or parent workspace files.
+Software release monitoring and game-price tracking for a local dashboard. Built with **ASP.NET Core 10, Entity Framework Core and SQLite**.
 
-## Build, test, run
+[Español](README.es.md) · [Frontend](https://github.com/David-H-Afonso/Watchboard.Front) · [Changelog](CHANGELOG.md)
 
-Install the .NET **10 SDK** with current security patches. SDK policy and the local EF tool manifest are included.
+## Features
+
+- Compare installed software with releases from GitHub, npm and supported official feeds.
+- Organize installations by reusable locations and configure per-user widgets.
+- Match Steam and AllKeyShop sources while keeping their targets and histories separate.
+- Prefer Steam-activation keys or gifts, with an explicit alternative PC-platform fallback.
+- Store fee-inclusive published totals, observed minima and their dates.
+- Private accounts and portable configuration import/export.
+
+## Getting started
+
+Requires the **.NET 10 SDK**.
 
 ```sh
 dotnet restore Watchboard.Api.sln --locked-mode
 dotnet build Watchboard.Api.sln --no-restore
-dotnet test Watchboard.Api.sln --no-build
 dotnet run --project Watchboard.Api.csproj --no-launch-profile
 ```
 
-API: `http://127.0.0.1:5197`. Standalone data: `storage/watchboard.db`, ignored. The name intentionally differs from the versioned `Data` source directory on case-insensitive Windows. `Watchboard__DatabasePath` supports another path. The optional parent workspace launcher explicitly retains its existing `../data/watchboard.db`; changing repo boundaries does not move that installation's data.
+API: **http://127.0.0.1:5197**. Health: `GET /api/health`.
 
-First user **admin** chooses a local password in the first-run UI (or setup API). No default/shared password. Additional accounts are admin-created. Private routes require HttpOnly/SameSite Strict cookie sessions; records/config/widget rules are owner-scoped. Host probes and user management require administrator role. There is no password recovery/change flow yet.
+Run the frontend separately on port **5333**. On first access, choose the password for `admin`; there is no default password. Additional accounts are administrator-created.
 
-## Behavior
+## Configuration
 
-- Installed versus published provenance; GitHub URLs/npm/official release feeds; numeric and Fulldex date/hotfix comparison.
-- Owned canonical location catalog, independent of project names/groups and `installedOn` observation provenance. Assigning a location never probes a remote device; explicit reassignment/manual installation disables that watch's fixed local-host probe.
-- AllKeyShop PC keys/gifts and official Steam Spain/EUR purchases remain separate sources/history/targets. Generic unique exact-title metadata matching works in both directions, independently of stock/purchase-price availability. It validates appdetails ID/type/full title and the PC Product/SKU/canonical/base edition; bounded derived URLs are candidates, never proof by themselves. Unsafe/ambiguous matches stay reviewable.
-- AKS prefers eligible **Steam activation** keys/gifts even when another DRM is cheaper; only without an eligible Steam offer does it use a recognized, explicitly labelled other-PC-DRM fallback. Accounts, gift cards, wallets, console/unknown classifications and Steam-direct market rows are excluded. Actual platform/delivery/language restriction are stored per reading.
-- New market watches default to the lowest permitted published card/PayPal **total** (`best`) within that priority tier. Totals/coupons already include the published fees/discount: never apply them twice. Consistent explicit breakdowns are retained; missing breakdowns are not invented. Saved payment/region/merchant/edition filters still apply.
-- Existing owned compatible sources are reused from either URL, preserving filters, IDs, goals and history. Upcoming/unpriced games retain valid identity and an explicit missing-price state, never a fake zero. Deletions/opt-outs suppress automatic re-seeding; transient discovery failures are daily-retryable or explicitly forced.
-- Price and discovery share operation-scoped public success/failure snapshots, avoiding duplicate downloads; private DB scopes and source filters remain independent. Known independently checked public identities may cover a transport-only outage, never a live identity contradiction or an invented price. Healthy discovery stays generic.
-- Inclusive fresh-data goals, reported discounts/optional expiry, honestly observed sale periods.
-- Automatic prices default to daily (1440 minutes); explicit manual `{ "force": true, "scope": "prices" }` bypasses eligibility, not provider spacing/overlap/rate limits. Price freshness is interval plus two hours (26 hours by default).
-- Lifetime/730-day minima include earliest actual observation dates and use all eligible SQLite readings, not only the latest2160 details. Coverage checks gaps. There is **no verified public two-year backfill**; no old quotes are synthesized and blocked/private AKS history endpoints are never called.
-- Every minimum carries the platform/delivery/language of that exact earliest low reading, even outside the detail cap. Changes in platform, delivery, language, region or edition do not masquerade as comparable price drops. Unknown legacy context stays unknown, and cannot produce a fresh market goal/recommendation.
-- Portable configuration exports version2 and accepts v1. Location names, not runtime IDs, are remapped per owner. One-to-one instance matching preserves multiple installations/legacy duplicates; preview is read-only and import is atomic.
-- Widget software location IDs distinguish `null` (all, including unassigned) from `[]` (none). Updates-only defaults true and excludes missing/unknown/current/ahead/stale/error/detection-failed installs, without filtering independent game alerts.
-- Outbound IO never holds the short mutation semaphore; delayed results cannot recreate deleted records.
-- Optional in-process polling only; no OS task, Docker socket, SSH or arbitrary command.
+Defaults are in `appsettings.json`. Environment variables override them:
 
-This remains **loopback-only**, even with accounts. Do not expose through LAN/proxy/tunnel without designing HTTPS, proxy/origin policy, recovery, native widget/device scopes and operations. No production deployment is claimed.
+| Variable | Default |
+| --- | --- |
+| `Watchboard__DatabasePath` | `storage/watchboard.db` |
+| `Watchboard__EnablePolling` | `true` |
+| `Watchboard__PriceIntervalMinutes` | `1440` |
+| `Watchboard__VersionIntervalMinutes` | `360` |
+| `Watchboard__AllowRemoteAccess` | `false` |
+| `Watchboard__AllowedOrigins__0` | No override; local origins only |
+| `Watchboard__SecureCookies` | `false` (HTTPS requests still use Secure cookies) |
 
-## Data safety
+Polling runs only while the API is active. Prices can also be refreshed manually. Host-version detection runs on the API machine (inside the container when using Docker), not remote devices or the Docker host.
 
-Stop API and back up the entire configured runtime directory (`storage` standalone), including session keys and consistent DB/WAL/SHM. Windows keys are DPAPI-protected and user-bound. Migrations preserve legacy observations under the bootstrap admin; account migration refuses destructive downgrade. Restore a complete stopped data/runtime snapshot for rollback.
+## Docker
 
-Tests are inside `Watchboard.Api.Tests`, use isolated temporary SQLite and synthetic upstream responses, and exercise real middleware/setup/login cookies—no test auth bypass. Parser and comparison fixtures are inside that test repository tree. The small comparison fixture snapshot is also owned by the independent frontend repository; integration tooling can compare them, but neither repo imports the other.
+GitHub Actions publishes **`ghcr.io/david-h-afonso/watchboard-api`** for **Linux amd64**, using the built-in `GITHUB_TOKEN`. Pushes to the default branch update `latest`; all builds receive a full `sha-…` tag. Pushing `v1.0.0` additionally publishes `v1.0.0`, `1.0.0` and `1`.
 
-```sh
-dotnet tool restore
-dotnet ef migrations has-pending-model-changes --project Watchboard.Api.csproj
-dotnet list Watchboard.Api.sln package --vulnerable --include-transitive
-```
+ARM64 publication is deferred until runtime validation on native hardware; .NET execution under QEMU was not reliable.
 
-The design-time context is in-memory; generating/checking migrations does not open the normal database. Current additive contract: [docs/prices-v4-contract.md](docs/prices-v4-contract.md), preserving the [v3 location/config contract](docs/locations-prices-v3-contract.md) and [v2 baseline](docs/api-v2-contract.md). See [v4 backend/migration notes](docs/v4-backend-implementation.md) before applying to an existing installation. Frontend defaults to loopback port 5333, calling the API through its same-origin proxy. `X-Watchboard-User` is an expected-account assertion, never an auth credential. No public registration, external notifications, native widget tokens or remote deployment configured.
+Use the [frontend's Compose setup](https://github.com/David-H-Afonso/Watchboard.Front#docker) to run both images. It keeps port **8080 internal**, proxies `/api` from the web container and persists SQLite plus session keys in a named volume. No separate API port should be published.
 
-No distribution license has been selected. No secrets, environment credentials, generated builds, runtime keys or database files belong in Git.
+For a local image build: `docker build -t watchboard-api .`. The image runs as a non-root user; Compose explicitly enables container connections and exact browser origins. Outside that configuration the loopback-only default is unchanged.
+
+## Data and security
+
+Native operation is **loopback-only**; Compose also binds the web port to loopback by default. Remote access is an explicit trusted-LAN option, not an Internet-ready security guarantee. It requires exact `AllowedOrigins` and matching `AllowedHosts`, without wildcards. Sessions use protected HttpOnly, SameSite=Strict cookies; private records belong to the authenticated user. For HTTPS termination, set `Watchboard__SecureCookies=true`. Forwarded client headers are not trusted.
+
+Migrations run at startup. Before upgrading or restoring, stop the API and back up the **entire configured data directory**, including session keys and SQLite files. Never mix database, WAL and SHM files from different snapshots.
+
+Protect volume access: Linux session keys are stored in that volume, without Windows DPAPI protection. Do not assume Windows-protected session keys are portable to Linux.
+
+External prices may be unavailable or estimated. History contains actual saved observations, not a complete imported two-year history. Account offers, wallets and gift cards are excluded.
+
+## License
+
+[MIT](LICENSE) © 2026 David-H-Afonso.
