@@ -12,6 +12,7 @@ Software release monitoring and game-price tracking for a local dashboard. Built
 - Prefer Steam-activation keys or gifts, with an explicit alternative PC-platform fallback.
 - Store fee-inclusive published totals, observed minima and their dates.
 - Private accounts and portable configuration import/export.
+- In-place editing of software details and game labels/targets, preserving IDs and price history. Historical source identities and filters are protected from replacement.
 
 ## Getting started
 

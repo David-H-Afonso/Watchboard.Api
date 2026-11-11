@@ -12,6 +12,7 @@ API local para seguir versiones de software y precios de juegos. Desarrollada co
 - Prioridad para claves o regalos de Steam y alternativa de plataforma de PC indicada.
 - Totales publicados con comisiones, mínimos observados y sus fechas.
 - Importación y exportación de configuración.
+- Edición de versiones y nombres/objetivos de juegos conservando IDs e historial. No se sustituye la identidad ni los filtros de una fuente que ya tiene lecturas.
 
 ## Inicio
 

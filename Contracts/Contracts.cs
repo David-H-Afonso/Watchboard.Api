@@ -3,12 +3,19 @@ using System.Text.Json.Serialization;
 namespace Watchboard.Api.Contracts;
 
 public sealed record CreateSoftware(string Name, string Group, string Provider, string Source, string? InstalledVersion, Guid? LocationId = null);
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record UpdateSoftware(string Name, string Group, string Provider, string Source,
+    [property: JsonRequired] string? InstalledVersion, [property: JsonRequired] string? InstalledOn,
+    [property: JsonRequired] Guid? LocationId);
 public sealed record SetInstalledVersion(string? InstalledVersion, string? InstalledOn, Guid? LocationId = null, bool UpdateLocation = false);
 public sealed record LocationDto(Guid Id, string Name);
 public sealed record CreateLocation(string Name);
 public sealed record SetSoftwareLocation(Guid? LocationId);
 public sealed record CreateGame(string Name, string SourceUrl, string Edition = "Standard", string Region = "eu-global", string Payment = "best",
     bool OfficialOnly = false, int? TargetCents = null, bool? IncludeSteam = null, bool? IncludeCounterpart = null);
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record UpdateGame(string Name, string SourceUrl, string Edition, string Region, string Payment,
+    [property: JsonRequired] bool OfficialOnly, [property: JsonRequired] int? TargetCents);
 public sealed record LinkCounterpart(string? SourceUrl = null);
 public sealed record GameCreationDto(Guid Id, IReadOnlyList<Guid> RelatedIds, string MatchStatus, string? MatchNote);
 public sealed record SetPriceTarget(int? TargetCents);

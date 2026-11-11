@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Edit software and game watches in place with owner-scoped validation and preserved history, IDs and installation provenance.
+- Protect historical price definitions and reject stale source results after concurrent edits.
+
 ## 1.0.0 — 2026-11-10
 
 - Software release tracking with installed-version comparison and canonical locations.

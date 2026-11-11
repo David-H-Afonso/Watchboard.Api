@@ -70,7 +70,8 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
                 await using var merge = scopes.CreateAsyncScope();
                 var db = merge.ServiceProvider.GetRequiredService<WatchboardDbContext>();
                 var watch = await db.Software.SingleOrDefaultAsync(x => x.Id == original.Id && x.OwnerId == original.OwnerId, token);
-                if (watch is null || !await OwnerEnabled(db, original.OwnerId, token)) continue;
+                if (watch is null || !await OwnerEnabled(db, original.OwnerId, token) ||
+                    watch.Provider != original.Provider || watch.Source != original.Source) continue;
                 watch.LastAttemptAt = attemptedAt;
                 watch.Error = error;
                 if (result is not null)
@@ -96,7 +97,7 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
                 await using var merge = scopes.CreateAsyncScope();
                 var db = merge.ServiceProvider.GetRequiredService<WatchboardDbContext>();
                 var watch = await db.Games.SingleOrDefaultAsync(x => x.Id == original.Id && x.OwnerId == original.OwnerId, token);
-                if (watch is null || !await OwnerEnabled(db, original.OwnerId, token)) continue;
+                if (watch is null || !await OwnerEnabled(db, original.OwnerId, token) || !SamePriceRequest(watch, original)) continue;
                 ApplyPrice(watch, result, error, attemptedAt, prices.SnapshotTime(original.SourceUrl) ?? clock.GetUtcNow());
                 if (result is not null) succeeded++;
                 await db.SaveChangesAsync(token);
@@ -118,7 +119,7 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
                     await using var merge = scopes.CreateAsyncScope();
                     var db = merge.ServiceProvider.GetRequiredService<WatchboardDbContext>();
                     var watch = await db.Games.SingleOrDefaultAsync(x => x.Id == original.Id && x.OwnerId == original.OwnerId, token);
-                    if (watch is null || !await OwnerEnabled(db, original.OwnerId, token)) continue;
+                    if (watch is null || !await OwnerEnabled(db, original.OwnerId, token) || !SamePriceRequest(watch, original)) continue;
                     watch.CounterpartPending = false;
                     watch.CounterpartDiscoveryAttemptAt = clock.GetUtcNow();
                     watch.CounterpartStatus = "needs_review";
@@ -192,6 +193,10 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
             ActivationPlatform = result.ActivationPlatform, DeliveryType = result.DeliveryType, LanguageRestriction = result.LanguageRestriction
         });
     }
+
+    internal static bool SamePriceRequest(GameWatch current, GameWatch snapshot) =>
+        current.Provider == snapshot.Provider && current.SourceUrl == snapshot.SourceUrl && current.Edition == snapshot.Edition &&
+        current.Region == snapshot.Region && current.Payment == snapshot.Payment && current.OfficialOnly == snapshot.OfficialOnly;
 
     private static Task<bool> OwnerEnabled(WatchboardDbContext db, Guid ownerId, CancellationToken token) =>
         db.Users.AnyAsync(x => x.Id == ownerId && x.Enabled && x.PasswordHash != null, token);

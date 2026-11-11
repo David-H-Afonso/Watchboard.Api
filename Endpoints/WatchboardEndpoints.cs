@@ -83,6 +83,51 @@ public static class WatchboardEndpoints
             });
         }).RequireRateLimiting("writes");
 
+        api.MapPut("/software/{id:guid}", async (Guid id, UpdateSoftware value, ClaimsPrincipal user,
+            WatchboardDbContext db, OperationGate gate, TimeProvider clock, CancellationToken token) => await Mutate(gate, token, async () =>
+        {
+            var watch = await db.Software.SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == user.UserId(), token);
+            if (watch is null) return Results.NotFound();
+            if (!WatchValidation.Text(value.Name, 100) || value.Group is not ("pc" or "server" or "project") ||
+                !WatchValidation.ConfigSource(new SoftwareConfig(value.Name, value.Group, value.Provider, value.Source, null,
+                    value.InstalledVersion, value.InstalledOn, watch.IncludeInWidget)) ||
+                !WatchValidation.Version(value.InstalledVersion) || value.InstalledOn is not null && !WatchValidation.Text(value.InstalledOn, 100))
+                return Problem("Revisa el nombre, categoría, proveedor, fuente y datos de instalación.");
+            if (!await OwnedLocation(db, user.UserId(), value.LocationId, token)) return Results.NotFound();
+            var source = WatchValidation.SoftwareSource(value.Provider, value.Source);
+            var changedSource = watch.Provider != value.Provider || WatchValidation.SoftwareSource(watch.Provider, watch.Source) != source;
+            var changedLocation = watch.LocationId != value.LocationId;
+            var installed = Clean(value.InstalledVersion);
+            var installedOn = Clean(value.InstalledOn);
+            var changedInstallation = watch.InstalledVersion != installed || watch.InstalledOn != installedOn;
+            watch.Name = value.Name.Trim();
+            watch.Group = value.Group;
+            watch.Provider = value.Provider;
+            watch.Source = source;
+            watch.LocationId = value.LocationId;
+            if (changedSource || changedLocation || changedInstallation) watch.LocalTool = null;
+            if (changedSource)
+            {
+                watch.LatestVersion = null;
+                watch.ReleaseUrl = null;
+                watch.ReleasePublishedAt = null;
+                watch.LastAttemptAt = null;
+                watch.LastSuccessAt = null;
+                watch.Error = null;
+                watch.DetectionError = null;
+            }
+            if (changedInstallation)
+            {
+                watch.InstalledVersion = installed;
+                watch.InstalledOn = installed is null ? null : installedOn ?? "Sin especificar";
+                watch.InstalledMethod = installed is null ? null : "manual";
+                watch.InstalledCheckedAt = installed is null ? null : clock.GetUtcNow();
+                watch.DetectionError = null;
+            }
+            await db.SaveChangesAsync(token);
+            return Results.NoContent();
+        })).RequireRateLimiting("writes");
+
         api.MapPatch("/software/{id:guid}/installed", async (Guid id, SetInstalledVersion value, ClaimsPrincipal user,
             WatchboardDbContext db, OperationGate gate, TimeProvider clock, CancellationToken token) => await Mutate(gate, token, async () =>
         {
@@ -146,6 +191,13 @@ public static class WatchboardEndpoints
                 var result = await games.CreateAsync(user.UserId(), value, token);
                 return Results.Created($"/api/games/{result.Id}", result);
             }
+            catch (GameOperationException exception) { return Problem(exception.Message, exception.StatusCode); }
+        }).RequireRateLimiting("writes");
+
+        api.MapPut("/games/{id:guid}", async (Guid id, UpdateGame value, ClaimsPrincipal user,
+            GameWatchService games, CancellationToken token) =>
+        {
+            try { return Results.Ok(await games.UpdateAsync(user.UserId(), id, value, token)); }
             catch (GameOperationException exception) { return Problem(exception.Message, exception.StatusCode); }
         }).RequireRateLimiting("writes");
 

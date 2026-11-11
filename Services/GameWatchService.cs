@@ -57,6 +57,92 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         });
     }
 
+    public async Task<GameCreationDto> UpdateAsync(Guid ownerId, Guid id, UpdateGame value, CancellationToken token)
+    {
+        if (!WatchValidation.Text(value.Name, 150)) throw Invalid("Escribe un nombre de hasta 150 caracteres.");
+        var error = WatchValidation.Game(new CreateGame(value.Name, value.SourceUrl, value.Edition, value.Region,
+            value.Payment, value.OfficialOnly, value.TargetCents));
+        if (error is not null) throw Invalid(error);
+        var source = WatchValidation.GameUrl(value.SourceUrl)!.Value;
+        return await WriteAsync(token, async () =>
+        {
+            await AssertOwnerAsync(ownerId, token);
+            var watch = await db.Games.SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == ownerId, token)
+                ?? throw Invalid("No existe ese seguimiento.", 404);
+            if (source.Provider != watch.Provider)
+                throw Invalid("Para cambiar de tienda, añade otra fuente; no se sustituye el seguimiento existente.", 409);
+            var edition = source.Provider == "steam" ? "Standard" : value.Edition.Trim();
+            var payment = source.Provider == "steam" ? "card" : value.Payment;
+            var official = source.Provider == "steam" || value.OfficialOnly;
+            var changedSource = (WatchValidation.GameUrl(watch.SourceUrl)?.Url ?? watch.SourceUrl) != source.Url;
+            var targetUrl = !changedSource && value.SourceUrl.Trim() == watch.SourceUrl ? watch.SourceUrl : source.Url;
+            var changedEdition = !watch.Edition.Trim().Equals(edition, StringComparison.OrdinalIgnoreCase);
+            var changedFilters = changedEdition || watch.Region != value.Region || watch.Payment != payment || watch.OfficialOnly != official;
+            if ((changedSource || changedFilters) && await db.Prices.AnyAsync(x => x.GameWatchId == id, token))
+                throw Invalid("Este seguimiento ya tiene lecturas. Puedes editar el nombre y objetivo, pero para otro enlace, edición o filtros añade una fuente nueva y conserva este historial.", 409);
+            var editionKey = edition.ToUpperInvariant();
+            if ((changedSource || changedFilters) && await db.Games.AnyAsync(x => x.OwnerId == ownerId && x.Id != id && x.SourceUrl == source.Url &&
+                x.EditionKey == editionKey && x.Region == value.Region && x.Payment == payment && x.OfficialOnly == official, token))
+                throw Invalid("Ya sigues esta fuente con esos filtros. No se han combinado ni borrado los seguimientos.", 409);
+
+            var name = value.Name.Trim();
+            var relatedIds = new List<Guid>();
+            // A logical game's label is shared by the same verified group, never its goals or observations.
+            if (!changedSource && !changedEdition && watch.Name != name && watch.SteamAppId is { } appId &&
+                (watch.Provider == "steam" || watch.CounterpartStatus == "verified" && GameIdentities.BaseEdition(watch.Edition)))
+            {
+                var related = await db.Games.Where(x => x.OwnerId == ownerId && x.Id != id && x.SteamAppId == appId &&
+                    (x.Provider == "steam" || x.CounterpartStatus == "verified")).ToListAsync(token);
+                foreach (var other in related.Where(x => x.Edition.Trim().Equals(watch.Edition.Trim(), StringComparison.OrdinalIgnoreCase)))
+                {
+                    other.Name = name;
+                    relatedIds.Add(other.Id);
+                }
+            }
+            var oldUrl = watch.SourceUrl;
+            if (changedSource || changedEdition)
+            {
+                var related = await db.Games.Where(x => x.OwnerId == ownerId && x.Id != id && x.CounterpartUrl == oldUrl).ToListAsync(token);
+                foreach (var other in related)
+                {
+                    other.CounterpartUrl = null;
+                    other.CounterpartOptOut = true;
+                    other.CounterpartPending = false;
+                    other.CounterpartStatus = "needs_review";
+                    other.CounterpartNote = "La fuente vinculada fue editada. Verifica de nuevo la asociación si quieres recuperarla.";
+                }
+                watch.SteamAppId = source.AppId;
+                watch.CounterpartUrl = null;
+                watch.CounterpartOptOut = true;
+                watch.CounterpartPending = false;
+                watch.CounterpartStatus = "needs_review";
+                watch.CounterpartNote = "Fuente editada; la identidad y cualquier asociación deben verificarse de nuevo.";
+                watch.CounterpartDiscoveryAttemptAt = null;
+            }
+            else if (oldUrl != targetUrl)
+            {
+                var related = await db.Games.Where(x => x.OwnerId == ownerId && x.Id != id && x.CounterpartUrl == oldUrl).ToListAsync(token);
+                foreach (var other in related) other.CounterpartUrl = targetUrl;
+            }
+            watch.Name = name;
+            watch.SourceUrl = targetUrl;
+            // Preserve legacy uniqueness discriminators when the edition's identity did not change.
+            if (changedEdition) watch.Edition = edition;
+            watch.Region = value.Region;
+            watch.Payment = payment;
+            watch.OfficialOnly = official;
+            watch.TargetCents = value.TargetCents;
+            if (changedSource || changedFilters)
+            {
+                watch.LastAttemptAt = null;
+                watch.LastSuccessAt = null;
+                watch.Error = null;
+            }
+            await db.SaveChangesAsync(token);
+            return new(watch.Id, relatedIds, watch.CounterpartStatus, watch.CounterpartNote);
+        });
+    }
+
     public async Task<GameCreationDto> CounterpartAsync(Guid ownerId, Guid id, string? sourceUrl, CancellationToken token, bool pendingOnly = false)
     {
         var original = await db.Games.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == ownerId, token)
@@ -76,6 +162,8 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
             db.ChangeTracker.Clear();
             var watch = await db.Games.SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == ownerId, token)
                 ?? throw Invalid("El seguimiento se eliminó durante la consulta; no se ha vuelto a crear.", 404);
+            if (!RefreshCoordinator.SamePriceRequest(watch, original))
+                throw Invalid("La fuente fue editada durante la consulta. Recarga antes de vincularla.", 409);
             if (pendingOnly && (!watch.CounterpartPending || watch.CounterpartOptOut) || watch.CounterpartOptOut && !original.CounterpartOptOut)
                 return new(watch.Id, [], watch.CounterpartStatus, watch.CounterpartNote); // A later explicit deletion/opt-out wins.
             if (!pendingOnly) watch.CounterpartOptOut = false;
