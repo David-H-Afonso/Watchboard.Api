@@ -92,6 +92,7 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
                 string? error = null;
                 try { result = await prices.ReadAsync(original, token); }
                 catch (Exception ex) when (SourceFailures.Is(ex, token)) { error = SourceFailures.Message(ex); }
+                if (error is not null) logger.LogWarning("Price source {Provider} {SourceUrl}: {Error}", original.Provider, original.SourceUrl, error);
                 using var lease = await mutations.AcquireAsync(token);
                 if (lease is null) return new(checkedCount, succeeded, true, clock.GetUtcNow());
                 await using var merge = scopes.CreateAsyncScope();
@@ -104,14 +105,15 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
             }
             // One-time upgrade discovery plus transport-only retries, deliberately daily unless forced.
             // Explicit opt-outs/deletions are never a re-seed rule on subsequent polling ticks.
-            foreach (var original in games.Where(x => scope != "versions" && x.CounterpartPending && !x.CounterpartOptOut &&
+            foreach (var original in games.Where(x => scope != "versions" && !x.CounterpartOptOut &&
+                         (x.CounterpartPending || !automatic && force && x.CounterpartStatus != "verified") &&
                          (!automatic && force || Due(x.CounterpartDiscoveryAttemptAt, now, config.PriceIntervalMinutes))))
             {
                 await using var repair = scopes.CreateAsyncScope();
                 // Reuse the same public source snapshots already fetched for this refresh. Private DB
                 // state still has a fresh scope; a second download must not undo a successful first one.
                 var service = ActivatorUtilities.CreateInstance<GameWatchService>(repair.ServiceProvider, prices);
-                try { await service.CounterpartAsync(original.OwnerId, original.Id, null, token, pendingOnly: true); }
+                try { await service.CounterpartAsync(original.OwnerId, original.Id, null, token, pendingOnly: automatic || !force, respectOptOut: true); }
                 catch (GameOperationException exception)
                 {
                     using var lease = await mutations.AcquireAsync(token);

@@ -11,14 +11,14 @@ public sealed class GameOperationException(string message, int statusCode = 400)
     public int StatusCode { get; } = statusCode;
 }
 
-public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices, OperationGate mutations, TimeProvider clock)
+public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices, OperationGate mutations, TimeProvider clock, ILogger<GameWatchService> logger)
 {
     public async Task<GameCreationDto> CreateAsync(Guid ownerId, CreateGame value, CancellationToken token)
     {
         var error = WatchValidation.Game(value);
         if (error is not null) throw Invalid(error);
         var source = WatchValidation.GameUrl(value.SourceUrl)!.Value;
-        var edition = source.Provider == "steam" ? "Standard" : value.Edition.Trim();
+        var edition = source.Provider == "steam" ? "Standard" : AllKeyShopParser.NormalizeEdition(value.Edition);
         var include = value.IncludeCounterpart ?? value.IncludeSteam ?? true;
         if (value.IncludeSteam == true && source.Provider != "steam" && !GameIdentities.BaseEdition(edition))
             throw Invalid("Solo se puede asociar Steam a la edición Standard/base, no a otra edición.");
@@ -29,7 +29,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
             OfficialOnly = source.Provider == "steam" || value.OfficialOnly, TargetCents = value.TargetCents,
             SteamAppId = source.AppId, CreatedAt = clock.GetUtcNow(), CounterpartOptOut = !include
         };
-        var ownedSource = include && GameIdentities.BaseEdition(edition) ? await ExistingSourceAsync(ownerId, source.Url, token) : null;
+        var ownedSource = include ? await ExistingSourceAsync(ownerId, source.Url, token, edition: edition) : null;
         if (ownedSource is not null)
         {
             var reused = await CounterpartAsync(ownerId, ownedSource.Id, null, token);
@@ -39,8 +39,8 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         if (await db.Games.CountAsync(x => x.OwnerId == ownerId, token) >= 100) throw Invalid("Se admiten hasta 100 precios por cuenta.");
 
         var attempted = clock.GetUtcNow();
-        var prepared = await prices.PrepareAsync(watch, token, discoverCounterpart: include && GameIdentities.BaseEdition(edition));
-        if (watch.Name.Length == 0) watch.Name = prepared.Resolution?.Name ?? "";
+        var prepared = await prices.PrepareAsync(watch, token, discoverCounterpart: include);
+        if (watch.Name.Length == 0) watch.Name = prepared.Resolution is { } metadata ? GameIdentities.IdentityTitle(metadata) : "";
         if (watch.Name.Length == 0) throw Invalid(prepared.Error ?? "Indica un nombre para guardar el enlace con su error de fuente.");
         SetIdentity(watch, prepared.Resolution);
         RefreshCoordinator.ApplyPrice(watch, prepared.Price, prepared.Error, attempted, prepared.ObservedAt ?? clock.GetUtcNow());
@@ -53,6 +53,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
             var related = await MergePairAsync(watch, pair, 1, token);
             db.Games.Add(watch);
             await db.SaveChangesAsync(token);
+            LogOutcome(watch);
             return new(watch.Id, related, watch.CounterpartStatus, watch.CounterpartNote);
         });
     }
@@ -88,12 +89,11 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
             var name = value.Name.Trim();
             var relatedIds = new List<Guid>();
             // A logical game's label is shared by the same verified group, never its goals or observations.
-            if (!changedSource && !changedEdition && watch.Name != name && watch.SteamAppId is { } appId &&
-                (watch.Provider == "steam" || watch.CounterpartStatus == "verified" && GameIdentities.BaseEdition(watch.Edition)))
+            if (!changedSource && !changedEdition && watch.Name != name && GameIdentities.VerifiedSteamAppId(watch) is { } appId)
             {
                 var related = await db.Games.Where(x => x.OwnerId == ownerId && x.Id != id && x.SteamAppId == appId &&
                     (x.Provider == "steam" || x.CounterpartStatus == "verified")).ToListAsync(token);
-                foreach (var other in related.Where(x => x.Edition.Trim().Equals(watch.Edition.Trim(), StringComparison.OrdinalIgnoreCase)))
+                foreach (var other in related.Where(x => GameIdentities.VerifiedSteamAppId(x) == appId))
                 {
                     other.Name = name;
                     relatedIds.Add(other.Id);
@@ -143,16 +143,16 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         });
     }
 
-    public async Task<GameCreationDto> CounterpartAsync(Guid ownerId, Guid id, string? sourceUrl, CancellationToken token, bool pendingOnly = false)
+    public async Task<GameCreationDto> CounterpartAsync(Guid ownerId, Guid id, string? sourceUrl, CancellationToken token, bool pendingOnly = false, bool respectOptOut = false)
     {
         var original = await db.Games.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == ownerId, token)
             ?? throw Invalid("No existe ese seguimiento.", 404);
-        if (pendingOnly && (!original.CounterpartPending || original.CounterpartOptOut))
+        if (pendingOnly && (!original.CounterpartPending || original.CounterpartOptOut) || respectOptOut && original.CounterpartOptOut)
             return new(original.Id, [], original.CounterpartStatus, original.CounterpartNote);
         var link = sourceUrl ?? (original.CounterpartStatus == "verified" ? original.CounterpartUrl : null);
         if (link is not null) _ = ValidateManualLink(original, link);
         var attemptedAt = clock.GetUtcNow();
-        var prepared = await prices.PrepareAsync(original, token, discoverCounterpart: link is null && GameIdentities.BaseEdition(original.Edition));
+        var prepared = await prices.PrepareAsync(original, token, discoverCounterpart: link is null);
         var observedAt = prepared.ObservedAt ?? clock.GetUtcNow();
         var pair = await PreparePairAsync(original, prepared, link, token, manualSelection: sourceUrl is not null);
         return await WriteAsync(token, async () =>
@@ -164,13 +164,14 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
                 ?? throw Invalid("El seguimiento se eliminó durante la consulta; no se ha vuelto a crear.", 404);
             if (!RefreshCoordinator.SamePriceRequest(watch, original))
                 throw Invalid("La fuente fue editada durante la consulta. Recarga antes de vincularla.", 409);
-            if (pendingOnly && (!watch.CounterpartPending || watch.CounterpartOptOut) || watch.CounterpartOptOut && !original.CounterpartOptOut)
+            if (pendingOnly && (!watch.CounterpartPending || watch.CounterpartOptOut) || respectOptOut && watch.CounterpartOptOut || watch.CounterpartOptOut && !original.CounterpartOptOut)
                 return new(watch.Id, [], watch.CounterpartStatus, watch.CounterpartNote); // A later explicit deletion/opt-out wins.
             if (!pendingOnly) watch.CounterpartOptOut = false;
             if ((watch.LastSuccessAt is null || watch.Error is not null) && watch.LastAttemptAt == original.LastAttemptAt)
                 RefreshCoordinator.ApplyPrice(watch, prepared.Price, prepared.Error, attemptedAt, observedAt);
             var related = await MergePairAsync(watch, pair, 0, token);
             await db.SaveChangesAsync(token);
+            LogOutcome(watch);
             return new(watch.Id, related, watch.CounterpartStatus, watch.CounterpartNote);
         });
     }
@@ -178,7 +179,8 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
     private async Task<PairPlan> PreparePairAsync(GameWatch original, GamePreparation prepared, string? manualUrl, CancellationToken token, bool manualSelection = false)
     {
         var resolution = prepared.Resolution;
-        if (!GameIdentities.BaseEdition(original.Edition))
+        if (!GameIdentities.BaseEdition(original.Edition) && !(original.Provider == "allkeyshop" && prepared.IdentityValidated &&
+            resolution?.AllKeyShopEdition is { } selected && selected.Equals(AllKeyShopParser.NormalizeEdition(original.Edition), StringComparison.OrdinalIgnoreCase)))
         {
             if (manualUrl is not null) throw Invalid("La asociación exige la misma edición base; no se asocian upgrades, DLC ni ediciones distintas.", 409);
             return NoPair("needs_review", "Esta edición no es Standard/base. Usa fuentes independientes; no se asociará automáticamente a otra edición.");
@@ -191,25 +193,39 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         else
         {
             if (resolution?.MatchStatus != "verified")
-                return NoPair(resolution?.MatchStatus ?? "needs_review", resolution?.MatchNote ?? prepared.Error ?? "No hay coincidencia segura. Indica el enlace de la otra tienda para validarlo.", prepared.DiscoveryRetryable);
+                return NoPair(!GameIdentities.BaseEdition(original.Edition) ? "needs_review" : resolution?.MatchStatus ?? "needs_review",
+                    resolution?.MatchNote ?? prepared.Error ?? "No hay coincidencia segura. Indica el enlace de la otra tienda para validarlo.", prepared.DiscoveryRetryable);
             counterpartUrl = original.Provider == "steam" ? resolution.AllKeyShopUrl : resolution.SteamUrl;
             if (counterpartUrl is null) return NoPair("not_found", "No se encontró una fuente recíproca verificada. Puedes indicar su enlace manualmente.");
         }
         var source = WatchValidation.GameUrl(counterpartUrl)!.Value;
-        var existing = await ExistingSourceAsync(original.OwnerId, counterpartUrl, token);
         var candidate = new GameWatch
         {
             OwnerId = original.OwnerId, Provider = source.Provider, SourceUrl = source.Url, SteamAppId = source.AppId,
             Name = resolution?.Name ?? original.Name, Payment = source.Provider == "steam" ? "card" : "best",
-            OfficialOnly = source.Provider == "steam", CreatedAt = clock.GetUtcNow()
+            OfficialOnly = source.Provider == "steam", CreatedAt = clock.GetUtcNow(),
+            Edition = source.Provider == "allkeyshop" ? resolution?.AllKeyShopEdition ?? "Standard" : "Standard"
         };
+        var existing = await ExistingSourceAsync(original.OwnerId, counterpartUrl, token, edition: candidate.Edition);
         var attemptedAt = clock.GetUtcNow();
         // A reused source may have deliberate PayPal/global/official-only filters. Its first/retried
         // quote must be prepared for THOSE filters, not the defaults of a newly proposed counterpart.
         var quotedWatch = existing ?? candidate;
         var expectedAttempt = existing?.LastAttemptAt;
         var counterpart = await prices.PrepareAsync(quotedWatch, token, discoverCounterpart: false);
-        if (counterpart.Resolution is { } metadata) candidate.Name = metadata.Name;
+        // A manual Steam link can point at a page containing several editions. Select only the
+        // explicitly published edition whose FULL product+edition title equals the Steam game.
+        if (original.Provider == "steam" && resolution is not null && counterpart.Resolution is { } market &&
+            GameIdentities.MatchingEdition(market, resolution.Name) is { } matched &&
+            !matched.Equals(candidate.Edition, StringComparison.OrdinalIgnoreCase))
+        {
+            candidate.Edition = matched;
+            existing = await ExistingSourceAsync(original.OwnerId, counterpartUrl, token, edition: matched);
+            quotedWatch = existing ?? candidate;
+            expectedAttempt = existing?.LastAttemptAt;
+            counterpart = await prices.PrepareAsync(quotedWatch, token, discoverCounterpart: false);
+        }
+        if (counterpart.Resolution is { } counterpartMetadata) candidate.Name = GameIdentities.IdentityTitle(counterpartMetadata);
         var knownPair = GameIdentities.Find(original.SourceUrl);
         var verified = knownPair is not null && resolution?.MatchStatus == "verified" &&
             // A transport/quote error retains catalog evidence; contradictory identity evidence never does.
@@ -223,12 +239,11 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         }
         else if (prepared.IdentityValidated && counterpart.IdentityValidated && resolution is not null && counterpart.Resolution is not null)
         {
-            if (knownPair is not null || !GameIdentities.SameTitle(resolution.Name, counterpart.Resolution.Name) ||
-                !resolution.Editions.Any(GameIdentities.BaseEdition) || !counterpart.Resolution.Editions.Any(GameIdentities.BaseEdition) ||
+            if (knownPair is not null || !GameIdentities.SameTitle(GameIdentities.IdentityTitle(resolution), GameIdentities.IdentityTitle(counterpart.Resolution)) ||
                 original.SteamAppId is not null && original.Provider == "steam" && original.SteamAppId != WatchValidation.GameUrl(original.SourceUrl)!.Value.AppId)
             {
-                if (manualSelection) throw Invalid("No se pudo validar el mismo título completo, SKU PC y edición base. No se creó ninguna asociación.", 409);
-                return NoPair("needs_review", "La otra página no coincide con el título completo, SKU PC o edición base; no se mezclarán las fuentes.");
+                if (manualSelection) throw Invalid("No se pudo validar el mismo título completo, SKU PC y edición seleccionada. No se creó ninguna asociación.", 409);
+                return NoPair("needs_review", "La otra página no coincide con el título completo, SKU PC o edición seleccionada; no se mezclarán las fuentes.");
             }
             appId = original.Provider == "steam" ? WatchValidation.GameUrl(original.SourceUrl)!.Value.AppId : source.AppId;
             var advertisedSteam = original.Provider == "allkeyshop" ? resolution.SteamUrl : counterpart.Resolution.SteamUrl;
@@ -236,8 +251,9 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
                 throw Invalid("La identidad Steam publicada/candidata contradice el enlace manual. No se asociará otro juego.", 409);
             if (original.SteamAppId is not null && original.SteamAppId != appId)
                 throw Invalid("El seguimiento ya identifica otra aplicación Steam; no se mezclará su historial.", 409);
-            note = manualSelection ? "Enlace elegido manualmente y validado con título público completo, tipo de juego, SKU PC, enlace canónico y edición base; precios independientes." :
-                "Coincidencia pública exacta validada entre el juego Steam y el Product PC/SKU canónico de la edición base; precios independientes.";
+            var marketEdition = original.Provider == "allkeyshop" ? resolution.AllKeyShopEdition : counterpart.Resolution.AllKeyShopEdition;
+            note = manualSelection ? $"Enlace elegido manualmente y validado con título público completo, tipo de juego, SKU PC, enlace canónico y edición {marketEdition}; precios independientes." :
+                $"Coincidencia pública exacta validada entre el juego Steam y el Product PC/SKU canónico de la edición {marketEdition}; precios independientes.";
         }
         else
         {
@@ -269,7 +285,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         }
         var existing = plan.ExistingId is { } id
             ? await db.Games.SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == watch.OwnerId, token)
-            : await ExistingSourceAsync(watch.OwnerId, plan.Candidate.SourceUrl, token, tracked: true);
+            : await ExistingSourceAsync(watch.OwnerId, plan.Candidate.SourceUrl, token, tracked: true, edition: plan.Candidate.Edition);
         if (plan.ExistingId.HasValue && existing is null)
         {
             if (await db.Games.CountAsync(x => x.OwnerId == watch.OwnerId, token) + newOriginals > 100)
@@ -282,6 +298,9 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         }
         if (existing?.SteamAppId is { } existingAppId && existingAppId != plan.AppId)
             throw Invalid("La fuente existente pertenece a otra identidad Steam; no se modificará su historial.", 409);
+        if (existing is not null && (existing.Provider != plan.Candidate.Provider || existing.SourceUrl != plan.Candidate.SourceUrl ||
+            !AllKeyShopParser.NormalizeEdition(existing.Edition).Equals(AllKeyShopParser.NormalizeEdition(plan.Candidate.Edition), StringComparison.OrdinalIgnoreCase)))
+            throw Invalid("La identidad o edición de la fuente asociada cambió durante la consulta; no se mezclará su historial.", 409);
         if (watch.SteamAppId is { } currentAppId && currentAppId != plan.AppId)
             throw Invalid("La identidad del seguimiento cambió durante la consulta; recarga antes de asociar otra fuente.", 409);
         var adding = newOriginals + (existing is null ? 1 : 0);
@@ -306,8 +325,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         var attemptUnchanged = plan.ExistingId.HasValue ? existing.LastAttemptAt == plan.ExpectedAttempt : existing.LastAttemptAt is null;
         if (needsQuote && attemptUnchanged)
         {
-            var sameFilters = existing.Payment == plan.QuotedWatch!.Payment && existing.Region == plan.QuotedWatch.Region &&
-                existing.OfficialOnly == plan.QuotedWatch.OfficialOnly;
+            var sameFilters = RefreshCoordinator.SamePriceRequest(existing, plan.QuotedWatch!);
             if (sameFilters)
                 RefreshCoordinator.ApplyPrice(existing, plan.Prepared!.Price, plan.Prepared.Error, plan.AttemptedAt, plan.Prepared.ObservedAt ?? clock.GetUtcNow());
             else
@@ -325,7 +343,8 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
     {
         watch.CounterpartStatus = resolution?.MatchStatus ?? "needs_review";
         watch.CounterpartNote = resolution?.MatchNote ?? "La fuente no se pudo resolver. Reintenta o indica el enlace asociado para validarlo.";
-        if (!GameIdentities.BaseEdition(watch.Edition))
+        if (!GameIdentities.BaseEdition(watch.Edition) && !(resolution?.MatchStatus == "verified" &&
+            resolution.AllKeyShopEdition?.Equals(AllKeyShopParser.NormalizeEdition(watch.Edition), StringComparison.OrdinalIgnoreCase) == true))
         {
             watch.SteamAppId = null;
             watch.CounterpartStatus = "needs_review";
@@ -340,13 +359,12 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
 
     private static string ValidateManualLink(GameWatch original, string url)
     {
-        if (!GameIdentities.BaseEdition(original.Edition)) throw Invalid("La asociación exige la misma edición base, no un upgrade ni otra edición.", 409);
         var manual = WatchValidation.GameUrl(url) ?? throw Invalid("Usa una página pública HTTPS de Steam /app/ o de comparación de claves AllKeyShop.");
         if (manual.Provider == original.Provider) throw Invalid("El enlace asociado debe pertenecer a la otra tienda.");
         var known = GameIdentities.Find(original.SourceUrl);
         var otherKnown = GameIdentities.Find(manual.Url);
-        if (known is not null && manual.Url != (original.Provider == "steam" ? known.AllKeyShopUrl : known.SteamUrl) ||
-            otherKnown is not null && original.SourceUrl != (original.Provider == "steam" ? otherKnown.SteamUrl : otherKnown.AllKeyShopUrl))
+        if (GameIdentities.BaseEdition(original.Edition) && (known is not null && manual.Url != (original.Provider == "steam" ? known.AllKeyShopUrl : known.SteamUrl) ||
+            otherKnown is not null && original.SourceUrl != (original.Provider == "steam" ? otherKnown.SteamUrl : otherKnown.AllKeyShopUrl)))
             throw Invalid("El enlace entra en conflicto con el juego/SKU verificado; no se mezclarán historias ni ediciones.", 409);
         return manual.Url;
     }
@@ -358,12 +376,19 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
             x.EditionKey == edition && x.Region == watch.Region && x.Payment == watch.Payment && x.OfficialOnly == watch.OfficialOnly, token);
     }
 
-    private async Task<GameWatch?> ExistingSourceAsync(Guid ownerId, string url, CancellationToken token, bool tracked = false)
+    private async Task<GameWatch?> ExistingSourceAsync(Guid ownerId, string url, CancellationToken token, bool tracked = false, string edition = "Standard")
     {
         var query = db.Games.Where(x => x.OwnerId == ownerId && x.SourceUrl == url);
         var candidates = await (tracked ? query : query.AsNoTracking()).OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).ToListAsync(token);
         // Edition text, not the legacy uniqueness discriminator. Retain every legacy duplicate untouched.
-        return candidates.FirstOrDefault(x => GameIdentities.BaseEdition(x.Edition));
+        return candidates.FirstOrDefault(x => AllKeyShopParser.NormalizeEdition(x.Edition).Equals(AllKeyShopParser.NormalizeEdition(edition), StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void LogOutcome(GameWatch watch)
+    {
+        if (watch.Error is not null) logger.LogWarning("Price source {Provider} {SourceUrl}: {Error}", watch.Provider, watch.SourceUrl, watch.Error);
+        if (!watch.CounterpartOptOut && watch.CounterpartStatus != "verified")
+            logger.LogWarning("Counterpart for {Provider} {SourceUrl}: {Status}; {Note}", watch.Provider, watch.SourceUrl, watch.CounterpartStatus, watch.CounterpartNote);
     }
 
     private async Task AssertOwnerAsync(Guid ownerId, CancellationToken token)

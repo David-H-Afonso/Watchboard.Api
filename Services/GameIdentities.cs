@@ -1,5 +1,6 @@
 using System.Text;
 using Watchboard.Api.Contracts;
+using Watchboard.Api.Models;
 
 namespace Watchboard.Api.Services;
 
@@ -26,6 +27,30 @@ public static class GameIdentities
     }
 
     public static bool BaseEdition(string edition) => edition.Trim().Equals("Standard", StringComparison.OrdinalIgnoreCase);
+
+    public static string IdentityTitle(GameResolution value) => value.Provider == "allkeyshop" && value.AllKeyShopEdition is { } edition && !BaseEdition(edition)
+        ? $"{value.Name} {edition}" : value.Name;
+
+    public static string? MatchingEdition(GameResolution market, string steamTitle)
+    {
+        var matches = market.Editions.Where(edition => SameTitle(BaseEdition(edition) ? market.Name : $"{market.Name} {edition}", steamTitle))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    public static string? VerifiedSteamAppId(GameWatch watch) => watch.Provider == "steam" ? watch.SteamAppId :
+        watch.CounterpartStatus == "verified" && (BaseEdition(watch.Edition) ||
+            watch.SteamAppId is not null && WatchValidation.GameUrl(watch.CounterpartUrl)?.AppId == watch.SteamAppId) ? watch.SteamAppId : null;
+
+    public static IReadOnlyList<string> VariantComparisonCandidates(string title)
+    {
+        // A shorter URL is only a location candidate. The original FULL Steam title must subsequently
+        // equal Product name + an explicitly published edition. Standard is never substituted for it.
+        var suffix = new[] { "Enhanced Edition", "Enhanced", "Deluxe Edition", "Deluxe", "Ultimate Edition", "Ultimate",
+            "Definitive Edition", "Complete Edition", "Premium Edition", "Premium" }
+            .FirstOrDefault(value => title.EndsWith(" " + value, StringComparison.OrdinalIgnoreCase));
+        return suffix is null ? [] : PublicComparisonCandidates(title[..^(suffix.Length + 1)]).Take(1).ToList();
+    }
 
     // Positive public identity evidence checked on2026-11-10. This is a transport-only fallback,
     // NOT a replacement for generic discovery and never a price/stock/language cache. Healthy

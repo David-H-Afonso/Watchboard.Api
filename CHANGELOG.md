@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recognize Early Access as the base release phase and match explicitly published product editions to their exact Steam titles.
+- Retry previous unmatched sources on forced price refresh without overriding explicit opt-outs; log individual source failures.
+
 - Edit software and game watches in place with owner-scoped validation and preserved history, IDs and installation provenance.
 - Protect historical price definitions and reject stale source results after concurrent edits.
 

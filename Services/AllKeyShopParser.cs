@@ -10,7 +10,7 @@ namespace Watchboard.Api.Services;
 
 public static partial class AllKeyShopParser
 {
-    public static GameResolution Resolve(string html, string sourceUrl)
+    public static GameResolution Resolve(string html, string sourceUrl, string? requestedEdition = null)
     {
         var document = new HtmlParser().ParseDocument(html);
         var products = Products(document);
@@ -19,12 +19,15 @@ public static partial class AllKeyShopParser
         var scoped = IdentityScope(document, products[0], sourceUrl);
         using var data = OptionalPageData(document);
         var editions = data is not null && data.RootElement.TryGetProperty("editions", out var choices) && choices.ValueKind == JsonValueKind.Object
-            ? choices.EnumerateObject().Select(x => String(x.Value, "name")).Where(x => WatchValidation.Text(x, 60)).OfType<string>()
+            ? choices.EnumerateObject().Select(x => String(x.Value, "name")).Where(x => WatchValidation.Text(x, 60)).OfType<string>().Select(NormalizeEdition)
                 .Distinct(StringComparer.OrdinalIgnoreCase).Take(100).ToList() : [];
         // A scoped base Product can exist before a price table does. Its exact full title must still
         // match a validated Steam game; missing stock/prices are never missing identity or a zero quote.
         if (editions.Count == 0 && (scoped || GameIdentities.Find(sourceUrl) is not null)) editions.Add("Standard");
         if (editions.Count == 0) throw new SourceIdentityException("La página no publica ediciones ni un producto PC base verificable.");
+        var selected = requestedEdition is null ? editions.FirstOrDefault(GameIdentities.BaseEdition) ?? editions[0] : NormalizeEdition(requestedEdition);
+        if (!editions.Contains(selected, StringComparer.OrdinalIgnoreCase))
+            throw new SourceIdentityException("La página no publica la edición seleccionada; no se sustituirá por otra.");
         if (data is not null && data.RootElement.TryGetProperty("isAccPage", out var accountPage) && accountPage.ValueKind == JsonValueKind.True)
             throw new SourceIdentityException("Esta página vende cuentas, no una clave o regalo del juego base.");
 
@@ -44,9 +47,12 @@ public static partial class AllKeyShopParser
             if (sku is not null && sku != known.AllKeyShopSku || !GameIdentities.SameTitle(name, known.Name) ||
                 ids.Any(id => id != known.SteamAppId))
                 throw new SourceIdentityException("La página contradice el SKU/título verificado. Revisa manualmente el enlace; no se asociará otro juego.");
-            return GameIdentities.KnownResolution(sourceUrl)! with { Name = name, Editions = editions };
+            var result = GameIdentities.KnownResolution(sourceUrl)! with { Name = name, Editions = editions, AllKeyShopEdition = selected };
+            return GameIdentities.BaseEdition(selected) ? result : result with { SteamAppId = null, SteamUrl = null,
+                MatchStatus = "needs_review", MatchNote = "La edición seleccionada requiere verificar su título completo, no el juego base del catálogo." };
         }
-        return GameIdentities.Unverified("allkeyshop", sourceUrl, name, editions, ids.Count == 1 ? ids.Single() : null);
+        return GameIdentities.Unverified("allkeyshop", sourceUrl, name, editions, ids.Count == 1 ? ids.Single() : null)
+            with { AllKeyShopEdition = selected };
     }
 
     public static bool HasIdentityScope(string html, string sourceUrl)
@@ -92,7 +98,7 @@ public static partial class AllKeyShopParser
                 var editionName = String(edition, "name");
                 var context = QuoteContext.Classify(offer, region);
                 if (context is null || !QuoteContext.CompatibleRegion(watch.Region, context.Region) ||
-                    !string.Equals(editionName, watch.Edition.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+                    editionName is null || !NormalizeEdition(editionName).Equals(NormalizeEdition(watch.Edition), StringComparison.OrdinalIgnoreCase)) continue;
                 if (watch.OfficialOnly && (!offer.TryGetProperty("isOfficial", out var official) || official.ValueKind != JsonValueKind.True)) continue;
                 if (!Number(offer, "id", out var id) || id <= 0 || decimal.Truncate(id) != id ||
                     !Number(offer, "merchant", out var merchantId) || merchantId <= 0 || decimal.Truncate(merchantId) != merchantId)
@@ -117,7 +123,7 @@ public static partial class AllKeyShopParser
                     if (Money(offer, "price", out var publishedBase) && Money(offer, "fees" + suffix, out var publishedFee) &&
                         publishedBase + publishedFee == total)
                     { basis = publishedBase; fee = publishedFee; }
-                    results.Add(new PriceResult(total, "EUR", merchantName!, context.Region, editionName!,
+                    results.Add(new PriceResult(total, "EUR", merchantName!, context.Region, watch.Edition.Trim(),
                         $"https://www.allkeyshop.com/redirection/offer/eur/{id:0}?locale=en&merchant={merchantId:0}", coupon, 0,
                         PaymentMethod: method, BasePriceCents: basis, FeeCents: fee, FeeBasis: "included",
                         ActivationPlatform: context.ActivationPlatform, DeliveryType: context.DeliveryType, LanguageRestriction: context.LanguageRestriction));
@@ -131,6 +137,9 @@ public static partial class AllKeyShopParser
     }
 
     private static bool ValidAppId(string value) => value.Length is >= 1 and <= 10 && value[0] != '0' && value.All(char.IsAsciiDigit);
+
+    // Early Access is a release phase, not a Deluxe/upgrade/product variant. Never strip title words.
+    public static string NormalizeEdition(string value) => value.Trim().Equals("Early Access", StringComparison.OrdinalIgnoreCase) ? "Standard" : value.Trim();
 
     private static bool IdentityScope(IDocument document, JsonElement product, string sourceUrl)
     {

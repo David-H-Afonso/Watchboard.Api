@@ -49,8 +49,7 @@ public sealed class DashboardReader(WatchboardDbContext db, TimeProvider clock, 
                 watch.OfficialOnly, watch.TargetCents, watch.LastAttemptAt, watch.LastSuccessAt, watch.Error, stale,
                 !stale && watch.Error is null && current is not null && watch.TargetCents.HasValue && current.PriceCents <= watch.TargetCents,
                 current, lowest, history.Count >= 2 && QuoteContext.Comparable(current!, history[^2]) ? current!.PriceCents - history[^2].PriceCents : null, history,
-                watch.IncludeInWidget, watch.Provider == "steam" || watch.CounterpartStatus == "verified" && GameIdentities.BaseEdition(watch.Edition)
-                    ? watch.SteamAppId : null, ObservedSales(summaries), reachedAt,
+                watch.IncludeInWidget, GameIdentities.VerifiedSteamAppId(watch), ObservedSales(summaries), reachedAt,
                 watch.CounterpartStatus, watch.CounterpartNote, lowestAt, Coverage(eligible, requestedFrom, now), twoYearLow, twoYearLowAt,
                 lowestPoint?.ActivationPlatform, lowestPoint?.DeliveryType, twoYearLowPoint?.ActivationPlatform, twoYearLowPoint?.DeliveryType,
                 lowestPoint?.LanguageRestriction, twoYearLowPoint?.LanguageRestriction, watch.CounterpartUrl));

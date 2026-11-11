@@ -46,7 +46,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
         if (source.Provider == "allkeyshop")
         {
             var html = (await PageAsync(source.Url, token)).Html;
-            var resolution = AllKeyShopParser.Resolve(html, source.Url);
+            var resolution = AllKeyShopParser.Resolve(html, source.Url, watch.Edition);
             return AllKeyShopParser.Parse(html, watch) with
                 { SteamAppId = GameIdentities.BaseEdition(watch.Edition) ? resolution.SteamAppId : null };
         }
@@ -76,7 +76,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
             {
                 var page = await PageAsync(source.Url, token);
                 observedAt = page.At;
-                resolution = AllKeyShopParser.Resolve(page.Html, source.Url);
+                resolution = AllKeyShopParser.Resolve(page.Html, source.Url, watch.Edition);
                 identityValidated = resolution.MatchStatus == "verified" || AllKeyShopParser.HasIdentityScope(page.Html, source.Url);
                 if (discoverCounterpart)
                 {
@@ -85,7 +85,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
                     retryable = discovered.Retryable;
                 }
                 return new(resolution, AllKeyShopParser.Parse(page.Html, watch) with
-                    { SteamAppId = GameIdentities.BaseEdition(watch.Edition) ? resolution.SteamAppId : null }, null,
+                    { SteamAppId = resolution.MatchStatus == "verified" ? resolution.SteamAppId : null }, null,
                     identityValidated, retryable, observedAt);
             }
             var snapshot = await SteamDataAsync(source.AppId!, token);
@@ -121,20 +121,21 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
     private async Task<Discovery> ResolveKeysAsync(string html, GameResolution resolution, CancellationToken token)
     {
         if (resolution.MatchStatus == "verified") return new(resolution, false);
-        if (!resolution.Editions.Any(GameIdentities.BaseEdition) || !AllKeyShopParser.HasIdentityScope(html, resolution.SourceUrl))
-            return new(resolution with { SteamUrl = null, MatchNote = "Falta una edición base o un Product PC con SKU y alcance canónico verificables." }, false);
+        if (resolution.AllKeyShopEdition is null || !AllKeyShopParser.HasIdentityScope(html, resolution.SourceUrl))
+            return new(resolution with { SteamUrl = null, MatchNote = "Falta una edición publicada o un Product PC con SKU y alcance canónico verificables." }, false);
+        var expectedTitle = GameIdentities.IdentityTitle(resolution);
         var ids = new HashSet<string>(StringComparer.Ordinal);
         if (WatchValidation.GameUrl(resolution.SteamUrl)?.AppId is { } publishedId) ids.Add(publishedId);
         var retryable = false;
         try
         {
-            using var results = await http.JsonAsync($"https://store.steampowered.com/api/storesearch/?term={Uri.EscapeDataString(resolution.Name)}&cc=es&l=english", token);
+            using var results = await http.JsonAsync($"https://store.steampowered.com/api/storesearch/?term={Uri.EscapeDataString(expectedTitle)}&cc=es&l=english", token);
             if (results.RootElement.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
             {
                 if (items.GetArrayLength() > 100) return new(resolution with { SteamUrl = null, MatchNote = "Demasiados resultados públicos para comprobar una coincidencia única de forma acotada." }, false);
                 foreach (var item in items.EnumerateArray())
                     if (item.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String &&
-                        GameIdentities.SameTitle(name.GetString()!, resolution.Name) && item.TryGetProperty("id", out var id) &&
+                        GameIdentities.SameTitle(name.GetString()!, expectedTitle) && item.TryGetProperty("id", out var id) &&
                         id.TryGetInt64(out var number) && number is > 0 and <= 9999999999)
                         ids.Add(number.ToString(CultureInfo.InvariantCulture));
             }
@@ -149,7 +150,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
             try
             {
                 var candidate = SteamResolution((await SteamDataAsync(id, token)).Data, $"https://store.steampowered.com/app/{id}/", id);
-                if (GameIdentities.SameTitle(candidate.Name, resolution.Name)) matches.Add(candidate);
+                if (GameIdentities.SameTitle(candidate.Name, expectedTitle)) matches.Add(candidate);
             }
             catch (Exception ex) when (SourceFailures.Is(ex, token))
             {
@@ -160,34 +161,36 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
         {
             var match = matches[0];
             return new(resolution with { SteamAppId = match.SteamAppId, SteamUrl = match.SourceUrl, MatchStatus = "verified",
-                MatchNote = "Coincidencia pública única: título completo exacto, aplicación Steam de tipo juego, ID y edición base validados; precios independientes." }, false);
+                MatchNote = $"Coincidencia pública única: título completo exacto, aplicación Steam de tipo juego, ID y edición {resolution.AllKeyShopEdition} validados; precios independientes." }, false);
         }
-        if (retryable && matches.Count == 0 && GameIdentities.TransportFallback(resolution.SourceUrl, resolution.Name, AllKeyShopParser.ProductSku(html)) is { } cached &&
+        if (retryable && matches.Count == 0 && GameIdentities.BaseEdition(resolution.AllKeyShopEdition) && GameIdentities.TransportFallback(resolution.SourceUrl, resolution.Name, AllKeyShopParser.ProductSku(html)) is { } cached &&
             ids.All(id => id == cached.SteamAppId))
-            return new(cached with { Name = resolution.Name, Editions = resolution.Editions }, false);
+            return new(cached with { Name = resolution.Name, Editions = resolution.Editions, AllKeyShopEdition = resolution.AllKeyShopEdition }, false);
         return new(resolution with { SteamAppId = null, SteamUrl = matches.Count == 1 ? matches[0].SourceUrl : null,
             MatchStatus = matches.Count > 1 || retryable ? "needs_review" : "not_found",
             MatchNote = retryable ? "La búsqueda pública no pudo completarse. Se puede reintentar sin inventar precios ni asociar una coincidencia incompleta." :
                 matches.Count > 1 ? "Varias aplicaciones publican ese título completo; elige el enlace correcto manualmente." :
-                "No se encontró un juego Steam con ese título completo y edición base. Puedes indicar su enlace manualmente." }, retryable);
+                "No se encontró un juego Steam con ese título completo y edición seleccionada. Puedes indicar su enlace manualmente." }, retryable);
     }
 
     private async Task<Discovery> ResolveSteamAsync(GameResolution resolution, CancellationToken token)
     {
         if (resolution.MatchStatus == "verified") return new(resolution, false);
-        var matches = new List<(GameResolution Resolution, string Sku)>();
+        var matches = new List<(GameResolution Resolution, string Sku, string Edition)>();
         var retryable = false;
-        foreach (var url in GameIdentities.PublicComparisonCandidates(resolution.Name).Take(MaximumAllKeyShopCandidates))
+        var candidates = GameIdentities.PublicComparisonCandidates(resolution.Name);
+        foreach (var url in candidates.Take(2).Concat(GameIdentities.VariantComparisonCandidates(resolution.Name)).Concat(candidates.Skip(2))
+                     .Distinct(StringComparer.Ordinal).Take(MaximumAllKeyShopCandidates))
         {
             try
             {
                 var page = await PageAsync(url, token);
                 var candidate = AllKeyShopParser.Resolve(page.Html, url);
-                if (!AllKeyShopParser.HasIdentityScope(page.Html, url) || !candidate.Editions.Any(GameIdentities.BaseEdition) ||
-                    !GameIdentities.SameTitle(candidate.Name, resolution.Name)) continue;
+                var edition = GameIdentities.MatchingEdition(candidate, resolution.Name);
+                if (!AllKeyShopParser.HasIdentityScope(page.Html, url) || edition is null) continue;
                 if (candidate.SteamAppId is not null && candidate.SteamAppId != resolution.SteamAppId) continue;
                 if (WatchValidation.GameUrl(candidate.SteamUrl)?.AppId is { } advertised && advertised != resolution.SteamAppId) continue;
-                matches.Add((candidate, AllKeyShopParser.ProductSku(page.Html)!));
+                matches.Add((candidate, AllKeyShopParser.ProductSku(page.Html)!, edition));
             }
             catch (Exception ex) when (SourceFailures.Is(ex, token))
             {
@@ -196,8 +199,9 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
         }
         var products = matches.GroupBy(x => x.Sku, StringComparer.Ordinal).ToList();
         if (products.Count == 1 && !retryable)
-            return new(resolution with { AllKeyShopUrl = products[0].First().Resolution.SourceUrl, MatchStatus = "verified",
-                MatchNote = "Coincidencia pública única: Product PC, SKU, enlace canónico, título completo y edición base validados; el precio puede no estar disponible." }, false);
+            return new(resolution with { AllKeyShopUrl = products[0].First().Resolution.SourceUrl,
+                AllKeyShopEdition = products[0].First().Edition, MatchStatus = "verified",
+                MatchNote = $"Coincidencia pública única: Product PC, SKU, enlace canónico y título completo de la edición {products[0].First().Edition} validados; el precio puede no estar disponible." }, false);
         if (retryable && products.Count == 0 && GameIdentities.TransportFallback(resolution.SourceUrl, resolution.Name) is { } cached)
             return new(cached with { Name = resolution.Name }, false);
         return new(resolution with { AllKeyShopUrl = null, MatchStatus = products.Count > 1 || retryable ? "needs_review" : "not_found",
