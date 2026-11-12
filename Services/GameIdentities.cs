@@ -11,6 +11,12 @@ public sealed record VerifiedGame(string SteamAppId, string AllKeyShopUrl, strin
 
 public static class GameIdentities
 {
+    private static readonly IReadOnlyDictionary<string, string> RomanTitleNumbers = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["II"] = "2", ["III"] = "3", ["IV"] = "4", ["V"] = "5", ["VI"] = "6", ["VII"] = "7",
+        ["VIII"] = "8", ["IX"] = "9", ["X"] = "10", ["XI"] = "11", ["XII"] = "12", ["XIII"] = "13",
+        ["XIV"] = "14", ["XV"] = "15", ["XVI"] = "16", ["XVII"] = "17", ["XVIII"] = "18", ["XIX"] = "19", ["XX"] = "20"
+    };
     // Independently checked public product identities. Packages are NOT app IDs:
     // Yakuza full 1063458 != upgrade 1470285; Mafia base 699541 != Definitive 1687573.
     public static IReadOnlyList<VerifiedGame> Verified { get; } = [
@@ -46,10 +52,14 @@ public static class GameIdentities
     {
         // A shorter URL is only a location candidate. The original FULL Steam title must subsequently
         // equal Product name + an explicitly published edition. Standard is never substituted for it.
-        var suffix = new[] { "Enhanced Edition", "Enhanced", "Deluxe Edition", "Deluxe", "Ultimate Edition", "Ultimate",
+        var suffix = new[] { "Infernal Edition", "Enhanced Edition", "Enhanced", "Deluxe Edition", "Deluxe", "Ultimate Edition", "Ultimate",
             "Definitive Edition", "Complete Edition", "Premium Edition", "Premium" }
             .FirstOrDefault(value => title.EndsWith(" " + value, StringComparison.OrdinalIgnoreCase));
-        return suffix is null ? [] : PublicComparisonCandidates(title[..^(suffix.Length + 1)]).Take(1).ToList();
+        if (suffix is null) return [];
+        var baseTitle = title[..^(suffix.Length + 1)];
+        // A variant's market URL is often the base-product page with the chosen edition in its
+        // published selector. Try the roman/numeric-normalized base slug first (e.g. Diablo II/2).
+        return PublicComparisonCandidates(CanonicalTitle(baseTitle, abbreviateThousands: false)).Take(1).ToList();
     }
 
     // Positive public identity evidence checked on2026-11-10. This is a transport-only fallback,
@@ -73,26 +83,16 @@ public static class GameIdentities
             "Identidad de producto comprobada con metadatos públicos el10/11/2026; la fuente no respondió ahora y no se ha inventado ningún precio.");
     }
 
-    // Punctuation/case/Unicode presentation only. Never remove edition, upgrade, DLC, or title words.
-    public static string TitleKey(string title) => string.Concat(PresentationText(title)
-        .Normalize(NormalizationForm.FormKC).Where(char.IsLetterOrDigit)).ToUpperInvariant();
+    // Punctuation, common Roman/Arabic sequel notation and numeric K shorthand only.
+    // All title words and edition qualifiers remain required; no fuzzy/substring comparison.
+    public static string TitleKey(string title) => string.Concat(PresentationText(title).Normalize(NormalizationForm.FormKC)
+        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Select(NormalizeTitleToken));
     public static bool SameTitle(string first, string second) => TitleKey(first) == TitleKey(second);
 
     public static IReadOnlyList<string> PublicComparisonCandidates(string title)
     {
-        var plain = PresentationText(title);
-        var slugs = new[] { plain, plain.Replace(".", "", StringComparison.Ordinal) }
-            .Select(value =>
-            {
-                var result = new StringBuilder();
-                foreach (var character in value.Normalize(NormalizationForm.FormKD).ToLowerInvariant())
-                {
-                    if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character) == System.Globalization.UnicodeCategory.NonSpacingMark) continue;
-                    if (char.IsAsciiLetterOrDigit(character)) result.Append(character);
-                    else if (result.Length > 0 && result[^1] != '-') result.Append('-');
-                }
-                return result.ToString().Trim('-');
-            }).Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+        var slugs = new[] { title, CanonicalTitle(title, abbreviateThousands: true), CanonicalTitle(title, abbreviateThousands: false) }
+            .Select(Slug).Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToList();
         // Full title, including numbers/edition/DLC words. Slugs propose pages; only fetched Product
         // title + PC category + SKU + canonical scope can establish a match.
         return slugs.SelectMany(slug => new[] { $"https://www.allkeyshop.com/blog/buy-{slug}-cd-key-compare-prices/",
@@ -102,6 +102,37 @@ public static class GameIdentities
 
     private static string PresentationText(string value) => new(value.Where(character => character is not
         ('™' or '®' or '℠' or 'Ⓡ' or '\'' or '’' or '‘' or '‛' or 'ʼ' or 'ʻ' or '＇' or '′' or '`' or '´')).ToArray());
+
+    private static string CanonicalTitle(string title, bool abbreviateThousands) => string.Join(' ', title.Normalize(NormalizationForm.FormKC)
+        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Select(token =>
+        {
+            var clean = string.Concat(token.Where(char.IsLetterOrDigit)).ToUpperInvariant();
+            if (RomanTitleNumbers.TryGetValue(clean, out var number)) return number;
+            if (clean.Length > 1 && clean[^1] == 'K' && clean[..^1].All(char.IsAsciiDigit))
+                return abbreviateThousands ? clean : clean[..^1] + "000";
+            if (abbreviateThousands && clean.Length is >= 4 and <= 6 && clean.All(char.IsAsciiDigit) && clean.EndsWith("000", StringComparison.Ordinal))
+                return clean[..^3] + "K";
+            return clean;
+        }));
+
+    private static string NormalizeTitleToken(string token)
+    {
+        var clean = string.Concat(token.Where(char.IsLetterOrDigit)).ToUpperInvariant();
+        if (RomanTitleNumbers.TryGetValue(clean, out var number)) return number;
+        return clean.Length > 1 && clean[^1] == 'K' && clean[..^1].All(char.IsAsciiDigit) ? clean[..^1] + "000" : clean;
+    }
+
+    private static string Slug(string value)
+    {
+        var result = new StringBuilder();
+        foreach (var character in PresentationText(value).Normalize(NormalizationForm.FormKD).ToLowerInvariant())
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character) == System.Globalization.UnicodeCategory.NonSpacingMark) continue;
+            if (char.IsAsciiLetterOrDigit(character)) result.Append(character);
+            else if (result.Length > 0 && result[^1] != '-') result.Append('-');
+        }
+        return result.ToString().Trim('-');
+    }
 
     public static GameResolution? KnownResolution(string sourceUrl)
     {

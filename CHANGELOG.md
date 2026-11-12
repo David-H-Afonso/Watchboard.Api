@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Match equivalent sequel notation (Roman/Arabic numerals, comma-separated thousands, and numeric “K” shorthand) only when the complete product title agrees.
+- Discover public marketplace pages for edition-qualified Steam titles, including variants listed on a base product page; preserve the selected edition and independent price history.
+
 - Apply a newly created game's initial target to both newly created sources, preserving existing goals and subsequent independent edits.
 
 - Recognize Early Access as the base release phase and match explicitly published product editions to their exact Steam titles.
