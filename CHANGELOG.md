@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Apply a newly created game's initial target to both newly created sources, preserving existing goals and subsequent independent edits.
+
 - Recognize Early Access as the base release phase and match explicitly published product editions to their exact Steam titles.
 - Retry previous unmatched sources on forced price refresh without overriding explicit opt-outs; log individual source failures.
 

@@ -44,7 +44,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         if (watch.Name.Length == 0) throw Invalid(prepared.Error ?? "Indica un nombre para guardar el enlace con su error de fuente.");
         SetIdentity(watch, prepared.Resolution);
         RefreshCoordinator.ApplyPrice(watch, prepared.Price, prepared.Error, attempted, prepared.ObservedAt ?? clock.GetUtcNow());
-        var pair = include ? await PreparePairAsync(watch, prepared, null, token) : NoPair(watch.CounterpartStatus, watch.CounterpartNote);
+        var pair = include ? await PreparePairAsync(watch, prepared, null, token, useInitialTarget: true) : NoPair(watch.CounterpartStatus, watch.CounterpartNote);
 
         return await WriteAsync(token, async () =>
         {
@@ -176,7 +176,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         });
     }
 
-    private async Task<PairPlan> PreparePairAsync(GameWatch original, GamePreparation prepared, string? manualUrl, CancellationToken token, bool manualSelection = false)
+    private async Task<PairPlan> PreparePairAsync(GameWatch original, GamePreparation prepared, string? manualUrl, CancellationToken token, bool manualSelection = false, bool useInitialTarget = false)
     {
         var resolution = prepared.Resolution;
         if (!GameIdentities.BaseEdition(original.Edition) && !(original.Provider == "allkeyshop" && prepared.IdentityValidated &&
@@ -203,7 +203,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         {
             OwnerId = original.OwnerId, Provider = source.Provider, SourceUrl = source.Url, SteamAppId = source.AppId,
             Name = resolution?.Name ?? original.Name, Payment = source.Provider == "steam" ? "card" : "best",
-            OfficialOnly = source.Provider == "steam", CreatedAt = clock.GetUtcNow(),
+            OfficialOnly = source.Provider == "steam", CreatedAt = clock.GetUtcNow(), TargetCents = useInitialTarget ? original.TargetCents : null,
             Edition = source.Provider == "allkeyshop" ? resolution?.AllKeyShopEdition ?? "Standard" : "Standard"
         };
         var existing = await ExistingSourceAsync(original.OwnerId, counterpartUrl, token, edition: candidate.Edition);
