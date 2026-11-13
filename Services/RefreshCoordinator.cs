@@ -99,6 +99,21 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
                 var db = merge.ServiceProvider.GetRequiredService<WatchboardDbContext>();
                 var watch = await db.Games.SingleOrDefaultAsync(x => x.Id == original.Id && x.OwnerId == original.OwnerId, token);
                 if (watch is null || !await OwnerEnabled(db, original.OwnerId, token) || !SamePriceRequest(watch, original)) continue;
+                if (result is not null && watch.Provider == "allkeyshop" && GameIdentities.BaseEdition(watch.Edition) &&
+                    GameIdentities.IsDlcEdition(result.Edition))
+                {
+                    if (await db.Prices.AnyAsync(x => x.GameWatchId == watch.Id, token))
+                    {
+                        error = "AllKeyShop solo publica ahora una edición DLC. Se conserva el histórico Standard y no se mezclan las ediciones.";
+                        result = null;
+                    }
+                    else
+                    {
+                        watch.Edition = result.Edition;
+                        watch.CounterpartPending = !watch.CounterpartOptOut;
+                        watch.CounterpartDiscoveryAttemptAt = null;
+                    }
+                }
                 ApplyPrice(watch, result, error, attemptedAt, prices.SnapshotTime(original.SourceUrl) ?? clock.GetUtcNow());
                 if (result is not null) succeeded++;
                 await db.SaveChangesAsync(token);
@@ -196,8 +211,10 @@ public sealed class RefreshCoordinator(IServiceScopeFactory scopes, OperationGat
         });
     }
 
-    internal static bool SamePriceRequest(GameWatch current, GameWatch snapshot) =>
-        current.Provider == snapshot.Provider && current.SourceUrl == snapshot.SourceUrl && current.Edition == snapshot.Edition &&
+    internal static bool SamePriceRequest(GameWatch current, GameWatch snapshot) => SamePriceRequestExceptEdition(current, snapshot) && current.Edition == snapshot.Edition;
+
+    internal static bool SamePriceRequestExceptEdition(GameWatch current, GameWatch snapshot) =>
+        current.Provider == snapshot.Provider && current.SourceUrl == snapshot.SourceUrl &&
         current.Region == snapshot.Region && current.Payment == snapshot.Payment && current.OfficialOnly == snapshot.OfficialOnly;
 
     private static Task<bool> OwnerEnabled(WatchboardDbContext db, Guid ownerId, CancellationToken token) =>

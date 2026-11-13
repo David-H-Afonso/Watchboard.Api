@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Support exact purchasable Steam DLC as a separate product when Steam app type and AllKeyShop PC-DLC category agree; never substitute or group the parent game.
+
 - Match equivalent sequel notation (Roman/Arabic numerals, comma-separated thousands, and numeric “K” shorthand) only when the complete product title agrees.
 - Discover public marketplace pages for edition-qualified Steam titles, including variants listed on a base product page; preserve the selected edition and independent price history.
 

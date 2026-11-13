@@ -9,6 +9,7 @@ Software release monitoring and game-price tracking for a local dashboard. Built
 - Compare installed software with releases from GitHub, npm and supported official feeds.
 - Organize installations by reusable locations and configure per-user widgets.
 - Match Steam and AllKeyShop sources while keeping their targets and histories separate.
+- Track purchasable DLC as its exact Steam/PC product, independently of the parent game's price and history.
 - Verify sequel-number and named-edition variants against the complete public product title; edition-specific prices and histories stay independent.
 - Recognize Early Access as a release phase and verify explicit marketplace editions against the complete Steam title. Forced price refresh retries previous misses without overriding opt-outs.
 - Prefer Steam-activation keys or gifts, with an explicit alternative PC-platform fallback.

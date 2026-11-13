@@ -9,6 +9,7 @@ API local para seguir versiones de software y precios de juegos. Desarrollada co
 - Comparación de versiones instaladas y publicaciones de GitHub, npm y fuentes oficiales compatibles.
 - Ubicaciones reutilizables, cuentas privadas y widget configurable por usuario.
 - Asociación Steam ↔ AllKeyShop con metas e históricos independientes.
+- Seguimiento de DLC comprables como producto Steam/PC independiente, sin mezclar el precio ni el historial del juego base.
 - Verifica variantes de numeración y ediciones por el título completo; cada edición conserva su precio e histórico independientes.
 - Early Access se reconoce como fase de lanzamiento; las ediciones de tienda se validan contra el título Steam completo. La actualización forzada reintenta asociaciones pendientes sin ignorar exclusiones explícitas.
 - Prioridad para claves o regalos de Steam y alternativa de plataforma de PC indicada.

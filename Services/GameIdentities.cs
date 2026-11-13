@@ -34,15 +34,20 @@ public static class GameIdentities
 
     public static bool BaseEdition(string edition) => edition.Trim().Equals("Standard", StringComparison.OrdinalIgnoreCase);
 
-    public static string IdentityTitle(GameResolution value) => value.Provider == "allkeyshop" && value.AllKeyShopEdition is { } edition && !BaseEdition(edition)
-        ? $"{value.Name} {edition}" : value.Name;
+    public static string IdentityTitle(GameResolution value) => value.Provider == "allkeyshop" && value.AllKeyShopEdition is { } edition &&
+        !BaseEdition(edition) && !(value.ProductType == "dlc" && IsDlcEdition(edition)) &&
+        !TitleKey(value.Name).EndsWith(TitleKey(edition), StringComparison.Ordinal)
+            ? $"{value.Name} {edition}" : value.Name;
 
-    public static string? MatchingEdition(GameResolution market, string steamTitle)
+    public static string? MatchingEdition(GameResolution market, string steamTitle, string? steamProductType = null)
     {
-        var matches = market.Editions.Where(edition => SameTitle(BaseEdition(edition) ? market.Name : $"{market.Name} {edition}", steamTitle))
+        if (steamProductType is not null && market.ProductType is not null && steamProductType != market.ProductType) return null;
+        var matches = market.Editions.Where(edition => SameTitle(IdentityTitle(market with { AllKeyShopEdition = edition }), steamTitle))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         return matches.Count == 1 ? matches[0] : null;
     }
+
+    public static bool IsDlcEdition(string edition) => edition.Trim().ToUpperInvariant() is "DLC" or "DLC PACK" or "SEASON PASS" or "DLC SEASON PASS";
 
     public static string? VerifiedSteamAppId(GameWatch watch) => watch.Provider == "steam" ? watch.SteamAppId :
         watch.CounterpartStatus == "verified" && (BaseEdition(watch.Edition) ||
@@ -80,7 +85,7 @@ public static class GameIdentities
         if (known is null || observedTitle is not null && !SameTitle(known.Name, observedTitle) || observedSku is not null && known.AllKeyShopSku != observedSku) return null;
         return new(source.Value.Provider, source.Value.Url, known.Name, known.SteamAppId,
             ["Standard"], known.SteamUrl, known.AllKeyShopUrl, "verified",
-            "Identidad de producto comprobada con metadatos públicos el10/11/2026; la fuente no respondió ahora y no se ha inventado ningún precio.");
+            "Identidad de producto comprobada con metadatos públicos el10/11/2026; la fuente no respondió ahora y no se ha inventado ningún precio.", ProductType: "game");
     }
 
     // Punctuation, common Roman/Arabic sequel notation and numeric K shorthand only.
@@ -140,7 +145,7 @@ public static class GameIdentities
         var source = WatchValidation.GameUrl(sourceUrl);
         return known is null || source is null ? null : new(source.Value.Provider, source.Value.Url, known.Name, known.SteamAppId,
             ["Standard"], known.SteamUrl, known.AllKeyShopUrl, "verified",
-            "Identidad base verificada entre las páginas públicas de Steam y AllKeyShop; objetivos e historial independientes.");
+            "Identidad base verificada entre las páginas públicas de Steam y AllKeyShop; objetivos e historial independientes.", ProductType: "game");
     }
 
     public static GameResolution Unverified(string provider, string url, string name, IReadOnlyList<string> editions, string? candidateId = null) =>

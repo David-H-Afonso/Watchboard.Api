@@ -71,7 +71,7 @@ public sealed record WidgetItem(string Id, Guid WatchId, string Kind, string Tit
 public sealed record WidgetDto(DateTimeOffset GeneratedAt, UserDto User, IReadOnlyList<WidgetItem> Items);
 public sealed record GameResolution(string Provider, string SourceUrl, string Name, string? SteamAppId, IReadOnlyList<string> Editions,
     string? SteamUrl = null, string? AllKeyShopUrl = null, string MatchStatus = "needs_review", string? MatchNote = null,
-    string? AllKeyShopEdition = null);
+    string? AllKeyShopEdition = null, string? ProductType = null);
 public sealed record ResolveGame(string SourceUrl);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

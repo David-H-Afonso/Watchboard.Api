@@ -40,6 +40,14 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
 
         var attempted = clock.GetUtcNow();
         var prepared = await prices.PrepareAsync(watch, token, discoverCounterpart: include);
+        if (watch.Provider == "allkeyshop" && GameIdentities.BaseEdition(watch.Edition) && prepared.Resolution is { ProductType: "dlc", AllKeyShopEdition: { } singleEdition } singleEditionInfo &&
+            singleEditionInfo.Editions.Count == 1 && GameIdentities.IsDlcEdition(singleEdition))
+        {
+            // A standalone PC-DLC comparison often exposes only the edition "DLC" rather than
+            // "Standard". Adopt that single explicit product type; never guess on multi-edition pages.
+            watch.Edition = singleEdition;
+            prepared = await prices.PrepareAsync(watch, token, discoverCounterpart: include);
+        }
         if (watch.Name.Length == 0) watch.Name = prepared.Resolution is { } metadata ? GameIdentities.IdentityTitle(metadata) : "";
         if (watch.Name.Length == 0) throw Invalid(prepared.Error ?? "Indica un nombre para guardar el enlace con su error de fuente.");
         SetIdentity(watch, prepared.Resolution);
@@ -154,6 +162,11 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         var attemptedAt = clock.GetUtcNow();
         var prepared = await prices.PrepareAsync(original, token, discoverCounterpart: link is null);
         var observedAt = prepared.ObservedAt ?? clock.GetUtcNow();
+        var storedEdition = original.Edition;
+        var adoptedDlcEdition = original.Provider == "allkeyshop" && GameIdentities.BaseEdition(storedEdition) &&
+            prepared.Resolution is { ProductType: "dlc", AllKeyShopEdition: { } selectedEdition } editionInfo && editionInfo.Editions.Count == 1 &&
+            GameIdentities.IsDlcEdition(selectedEdition) ? selectedEdition : null;
+        if (adoptedDlcEdition is not null) original.Edition = adoptedDlcEdition;
         var pair = await PreparePairAsync(original, prepared, link, token, manualSelection: sourceUrl is not null);
         return await WriteAsync(token, async () =>
         {
@@ -162,8 +175,17 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
             db.ChangeTracker.Clear();
             var watch = await db.Games.SingleOrDefaultAsync(x => x.Id == id && x.OwnerId == ownerId, token)
                 ?? throw Invalid("El seguimiento se eliminó durante la consulta; no se ha vuelto a crear.", 404);
-            if (!RefreshCoordinator.SamePriceRequest(watch, original))
+            var sameRequest = adoptedDlcEdition is null ? RefreshCoordinator.SamePriceRequest(watch, original) :
+                watch.Edition == storedEdition && RefreshCoordinator.SamePriceRequestExceptEdition(watch, original);
+            if (!sameRequest)
                 throw Invalid("La fuente fue editada durante la consulta. Recarga antes de vincularla.", 409);
+            if (adoptedDlcEdition is not null)
+            {
+                if (await db.Prices.AnyAsync(x => x.GameWatchId == id, token))
+                    throw Invalid("No se cambiará la edición de una fuente que ya tiene histórico.", 409);
+                watch.Edition = adoptedDlcEdition;
+                watch.CounterpartPending = !watch.CounterpartOptOut;
+            }
             if (pendingOnly && (!watch.CounterpartPending || watch.CounterpartOptOut) || respectOptOut && watch.CounterpartOptOut || watch.CounterpartOptOut && !original.CounterpartOptOut)
                 return new(watch.Id, [], watch.CounterpartStatus, watch.CounterpartNote); // A later explicit deletion/opt-out wins.
             if (!pendingOnly) watch.CounterpartOptOut = false;
@@ -216,7 +238,7 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         // A manual Steam link can point at a page containing several editions. Select only the
         // explicitly published edition whose FULL product+edition title equals the Steam game.
         if (original.Provider == "steam" && resolution is not null && counterpart.Resolution is { } market &&
-            GameIdentities.MatchingEdition(market, resolution.Name) is { } matched &&
+            GameIdentities.MatchingEdition(market, resolution.Name, resolution.ProductType) is { } matched &&
             !matched.Equals(candidate.Edition, StringComparison.OrdinalIgnoreCase))
         {
             candidate.Edition = matched;
@@ -227,9 +249,9 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         }
         if (counterpart.Resolution is { } counterpartMetadata) candidate.Name = GameIdentities.IdentityTitle(counterpartMetadata);
         var knownPair = GameIdentities.Find(original.SourceUrl);
-        var verified = knownPair is not null && resolution?.MatchStatus == "verified" &&
+        var verified = knownPair is not null && resolution?.ProductType == "game" && resolution.MatchStatus == "verified" &&
             // A transport/quote error retains catalog evidence; contradictory identity evidence never does.
-            (counterpart.Resolution?.MatchStatus == "verified" || counterpart.Resolution is null);
+            (counterpart.Resolution is { MatchStatus: "verified", ProductType: "game" } || counterpart.Resolution is null);
         string? appId;
         string note;
         if (verified)
@@ -239,7 +261,8 @@ public sealed class GameWatchService(WatchboardDbContext db, PriceSources prices
         }
         else if (prepared.IdentityValidated && counterpart.IdentityValidated && resolution is not null && counterpart.Resolution is not null)
         {
-            if (knownPair is not null || !GameIdentities.SameTitle(GameIdentities.IdentityTitle(resolution), GameIdentities.IdentityTitle(counterpart.Resolution)) ||
+            if (knownPair is not null || resolution.ProductType != counterpart.Resolution.ProductType ||
+                !GameIdentities.SameTitle(GameIdentities.IdentityTitle(resolution), GameIdentities.IdentityTitle(counterpart.Resolution)) ||
                 original.SteamAppId is not null && original.Provider == "steam" && original.SteamAppId != WatchValidation.GameUrl(original.SourceUrl)!.Value.AppId)
             {
                 if (manualSelection) throw Invalid("No se pudo validar el mismo título completo, SKU PC y edición seleccionada. No se creó ninguna asociación.", 409);

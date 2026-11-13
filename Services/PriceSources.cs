@@ -150,7 +150,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
             try
             {
                 var candidate = SteamResolution((await SteamDataAsync(id, token)).Data, $"https://store.steampowered.com/app/{id}/", id);
-                if (GameIdentities.SameTitle(candidate.Name, expectedTitle)) matches.Add(candidate);
+                if (candidate.ProductType == resolution.ProductType && GameIdentities.SameTitle(candidate.Name, expectedTitle)) matches.Add(candidate);
             }
             catch (Exception ex) when (SourceFailures.Is(ex, token))
             {
@@ -161,7 +161,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
         {
             var match = matches[0];
             return new(resolution with { SteamAppId = match.SteamAppId, SteamUrl = match.SourceUrl, MatchStatus = "verified",
-                MatchNote = $"Coincidencia pública única: título completo exacto, aplicación Steam de tipo juego, ID y edición {resolution.AllKeyShopEdition} validados; precios independientes." }, false);
+                MatchNote = $"Coincidencia pública única: título completo exacto, tipo {match.ProductType}, ID y edición {resolution.AllKeyShopEdition} validados; precios independientes." }, false);
         }
         if (retryable && matches.Count == 0 && GameIdentities.BaseEdition(resolution.AllKeyShopEdition) && GameIdentities.TransportFallback(resolution.SourceUrl, resolution.Name, AllKeyShopParser.ProductSku(html)) is { } cached &&
             ids.All(id => id == cached.SteamAppId))
@@ -186,7 +186,7 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
             {
                 var page = await PageAsync(url, token);
                 var candidate = AllKeyShopParser.Resolve(page.Html, url);
-                var edition = GameIdentities.MatchingEdition(candidate, resolution.Name);
+                var edition = GameIdentities.MatchingEdition(candidate, resolution.Name, resolution.ProductType);
                 if (!AllKeyShopParser.HasIdentityScope(page.Html, url) || edition is null) continue;
                 if (candidate.SteamAppId is not null && candidate.SteamAppId != resolution.SteamAppId) continue;
                 if (WatchValidation.GameUrl(candidate.SteamUrl)?.AppId is { } advertised && advertised != resolution.SteamAppId) continue;
@@ -252,8 +252,8 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
             throw new SourceIdentityException("Steam no publica información verificable para esta aplicación.");
         if (!data.TryGetProperty("steam_appid", out var id) || !id.TryGetInt64(out var number) || number.ToString(CultureInfo.InvariantCulture) != appId)
             throw new SourceIdentityException("Steam ha devuelto otra aplicación; no se ha asociado al seguimiento.");
-        if (!data.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != "game")
-            throw new SourceIdentityException("Steam no identifica esta aplicación como juego completo; no se asociarán DLC, demos, herramientas ni upgrades.");
+        if (!data.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() is not ("game" or "dlc"))
+            throw new SourceIdentityException("Steam no identifica esta aplicación como juego o DLC comprable; no se asociarán demos, herramientas, vídeos ni upgrades.");
         return data.Clone();
     }
 
@@ -261,10 +261,14 @@ public sealed class PriceSources(SourceHttp http, SteamSaleEnrichment sales, Tim
     {
         var name = data.TryGetProperty("name", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         if (!WatchValidation.Text(name, 150)) throw new SourceIdentityException("Steam no publica un nombre verificable para esta aplicación.");
+        var productType = data.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String ? type.GetString() : null;
         var known = GameIdentities.KnownResolution(url);
+        if (known is not null && productType != "game")
+            throw new SourceIdentityException("El catálogo verificado identifica esta URL como juego completo, pero Steam la devuelve con otro tipo de aplicación.");
         if (known is not null && !GameIdentities.SameTitle(known.Name, name!))
             throw new SourceIdentityException("El título Steam contradice la identidad pública verificada. Revisa el enlace antes de asociarlo.");
-        return known is not null ? known with { Name = name!.Trim() } : GameIdentities.Unverified("steam", url, name!.Trim(), ["Standard"]);
+        return known is not null ? known with { Name = name!.Trim(), ProductType = productType } :
+            GameIdentities.Unverified("steam", url, name!.Trim(), ["Standard"]) with { ProductType = productType };
     }
 
     private async Task<PriceResult> SteamPriceAsync(JsonElement data, string url, string appId, CancellationToken token)
